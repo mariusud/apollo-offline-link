@@ -1,0 +1,43 @@
+{
+  "name": "apollo-offline-queue-link",
+  "version": "0.1.0",
+  "description": "A link that queues offline operations and retries when back online",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "keywords": [
+    "graphql",
+    "apollo",
+    "apollo-link",
+    "apollo-client",
+    "react-native",
+    "expo",
+    "offline",
+    "offline-first",
+    "queue",
+    "mutation",
+    "network",
+    "persistence"
+  ],
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "tsc": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@apollo/client": "^4.0.0",
+    "graphql": "^15.0.0 || ^16.0.0",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-community/netinfo": "^11.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  }
+}

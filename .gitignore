@@ -1,0 +1,19 @@
+.DS_Store
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+/dist
+/examples/expo-demo/.expo
+
+# Expo
+.expo-shared
+.expo
+
+# Logs
+logs
+*.log
+
+# Misc
+coverage
