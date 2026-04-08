@@ -5,7 +5,7 @@
   WHEN: Update after completing each phase or encountering errors. More detailed than task_plan.md.
 -->
 
-## Session: 2026-03-18
+## Session: 2025-09-15
 <!-- 
   WHAT: The date of this work session.
   WHY: Helps track when work happened, useful for resuming after time gaps.
@@ -18,8 +18,8 @@
   WHY: Provides context for what was done, making it easier to resume or debug.
   WHEN: Update as you work through the phase, or at least when you complete it.
 -->
-- **Status:** complete
-- **Started:** 2026-03-18 00:00
+- **Status:** in_progress
+- **Started:** 2025-09-15 14:10
 <!-- 
   STATUS: Same as task_plan.md (pending, in_progress, complete)
   TIMESTAMP: When you started this phase (e.g., "2026-01-15 10:00")
@@ -32,8 +32,11 @@
       - Implemented add functionality
       - Fixed FileNotFoundError
   -->
-  - Confirmed package (not app), RN target, TypeScript, offline mutation queueing
-  - Collected reference link for apollo-link-queue
+  - Reviewed current `src/OfflineQueueLink.ts` and README to identify refactor targets.
+  - Captured requirements and constraints in findings.
+  - Split persistence and NetInfo into separate modules and wired them into the link.
+  - Restored Apollo typings for operations/links and removed remaining `any` usage.
+  - Converted to a class-based `OfflineQueueLink` API and updated tests/docs/examples.
 - Files created/modified:
   <!-- 
     WHAT: Which files you created or changed.
@@ -43,50 +46,29 @@
       - todos.json (created by app)
       - task_plan.md (updated)
   -->
-  - task_plan.md (updated)
-  - findings.md (updated)
-  - progress.md (updated)
+  - `src/persistence.ts` (created)
+  - `src/netinfo.ts` (created)
+  - `src/OfflineQueueLink.ts` (updated)
+  - `src/persistence.ts` (updated)
+  - `src/netinfo.ts` (updated)
+  - `src/index.ts` (updated)
+  - `test/OfflineQueueLink.test.ts` (updated)
+  - `examples/src/apollo.ts` (updated)
+  - `README.md` (updated)
+  - `task_plan.md` (updated)
+  - `findings.md` (updated)
+  - `progress.md` (updated)
 
 ### Phase 2: Planning & Structure
 <!-- 
   WHAT: Same structure as Phase 1, for the next phase.
   WHY: Keep a separate log entry for each phase to track progress clearly.
 -->
-- **Status:** complete
+- **Status:** pending
 - Actions taken:
-  - Defined queueing behavior, serialization, and retry strategy
-  - Decided on optional storage adapter and mutation-only default
+  -
 - Files created/modified:
-  - findings.md (updated)
-  - task_plan.md (updated)
-
-### Phase 3: Implementation
-- **Status:** complete
-- Actions taken:
-  - Created package structure, config, and core link implementation
-  - Added README and RN example setup
-  - Added Vitest test suite for queueing, retry, and persistence
-- Files created/modified:
-  - package.json (created)
-  - tsconfig.json (created)
-  - src/OfflineQueueLink.ts (created)
-  - src/index.ts (created)
-  - README.md (created)
-  - test/OfflineQueueLink.test.ts (created)
-  - examples/react-native/README.md (created)
-  - examples/react-native/apollo.ts (created)
-
-### Phase 4: Testing & Verification
-- **Status:** in_progress
-- Actions taken:
-  - Scaffolded Expo demo app and wired offline link
-  - Added demo README with run instructions
-  - Added react-native entrypoint to package metadata for Metro resolution
-- Files created/modified:
-  - examples/expo-demo/App.tsx (updated)
-  - examples/expo-demo/README.md (created)
-  - examples/expo-demo/src/apollo.ts (created)
-  - examples/expo-demo/package.json (updated)
+  -
 
 ## Test Results
 <!-- 
@@ -99,7 +81,7 @@
 -->
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
-|      |       |          |        |        |
+| Unit tests | `npm test` | Tests run | `vitest` not found | ✗ |
 
 ## Error Log
 <!-- 
@@ -113,7 +95,7 @@
 <!-- Keep ALL errors - they help avoid repetition -->
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
-| 2026-03-18 00:01 | create-expo-app timed out during npm install | 1 | Confirmed scaffold exists, continued setup |
+| 2025-09-15 20:13 | `vitest` not found | 1 | Install dev deps or use project’s test runner |
 
 ## 5-Question Reboot Check
 <!-- 
@@ -131,9 +113,9 @@
 <!-- If you can answer these, context is solid -->
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 4 |
-| Where am I going? | Phases 4-5 |
-| What's the goal? | Create a TypeScript Apollo Link package for React Native that queues failed mutations while offline and retries when connectivity returns. |
+| Where am I? | Phase X |
+| Where am I going? | Remaining phases |
+| What's the goal? | [goal statement] |
 | What have I learned? | See findings.md |
 | What have I done? | See above |
 
@@ -145,70 +127,3 @@
   - Include timestamps for errors to track when issues occurred
 -->
 *Update after completing each phase or encountering errors*
-
-## Session: 2026-03-31
-
-### Phase 4: Testing & Verification
-- **Status:** in_progress
-- Actions taken:
-  - Reapplied the simplified link API and removed custom adapter options.
-  - Added queueOperations filter and kept persist as a boolean toggle.
-  - Updated README usage, examples, and tests for the new API and Apollo v4 usage.
-  - Updated package metadata keywords/description and loosened graphql peer range.
-  - Improved network error detection and allowed listed queries without changing mutation-only default.
-  - Added optional logging for queue/flush activity.
-  - Loosened handler typing to avoid Apollo v4 Operation type conflicts.
-  - Refined NetInfo handling to avoid false online positives.
-  - Defaulted to offline when auto-detecting until reachability is confirmed.
-  - Added logging for forward execution and set offline on network error.
-  - Expanded network error detection and log details for diagnostics.
-  - Ensured flushed operations include a client reference, delaying flush until available.
-  - Added replay logging and preflight NetInfo checks.
-  - Added NetInfo online/offline logging event.
-  - Tweaked tsconfig for cleaner builds (noEmitOnError, no declaration maps).
-- Files created/modified:
-  - src/OfflineQueueLink.ts (updated)
-  - README.md (updated)
-  - examples/src/apollo.ts (updated)
-  - examples/README.md (updated)
-  - test/OfflineQueueLink.test.ts (updated)
-  - package.json (updated)
-  - src/OfflineQueueLink.ts (updated)
-  - README.md (updated)
-  - tsconfig.json (updated)
-
-## Session: 2026-03-30
-
-### Phase 4: Testing & Verification
-- **Status:** in_progress
-- Actions taken:
-  - Added auto NetInfo detection and async-storage shorthand support to the link.
-  - Updated README and examples to remove manual NetInfo wiring.
-  - Added queue snapshot API and documented Apollo Link principles.
-  - Rewrote the link as a RequestHandler-based factory to avoid ApolloLink class type mismatches.
-  - Simplified the link API, removed custom storage adapters, and eliminated type assertions.
-  - Added .gitignore and tsc script.
-  - Removed context whitelist and netInfo exposure, documented Apollo Client v4 usage.
-  - Added shouldRetry filter for per-operation retry control.
-  - Added persist option to toggle AsyncStorage queue persistence.
-  - Updated Apollo Client v4 usage to wrap the handler with ApolloLink.
-- Files created/modified:
-  - src/OfflineQueueLink.ts (updated)
-  - src/index.ts (updated)
-  - README.md (updated)
-  - examples/react-native/apollo.ts (updated)
-  - examples/react-native/README.md (updated)
-  - examples/expo-demo/src/apollo.ts (updated)
-  - examples/expo-demo/metro.config.js (created)
-  - examples/expo-demo/README.md (updated)
-  - examples/expo-demo/package.json (updated)
-  - test/OfflineQueueLink.test.ts (updated)
-  - examples/src/apollo.ts (updated)
-  - README.md (updated)
-  - package.json (updated)
-  - test/OfflineQueueLink.test.ts (updated)
-  - .gitignore (created)
-  - examples/package.json (updated)
-  - examples/metro.config.js (updated)
-  - package.json (updated)
-  - package.json (updated)

@@ -1,6 +1,6 @@
 export {
-  createOfflineQueueLink,
-  type OfflineQueueLink,
+  OfflineQueueLink,
+  type OfflineQueueLinkHandler,
   type OfflineQueueLinkOptions,
   type SerializedOperation,
 } from "./OfflineQueueLink";

@@ -1,48 +1,20 @@
-import { FetchResult, Observable, gql } from "@apollo/client";
-import { getMainDefinition } from "@apollo/client/utilities";
-import type { RequestHandler } from "@apollo/client/link/core";
+import { ApolloLink } from "@apollo/client/link/core";
+import type {
+  FetchResult,
+  NextLink,
+  Operation,
+  RequestHandler,
+} from "@apollo/client/link/core";
+import { Observable, gql } from "@apollo/client/utilities";
 import { print } from "graphql";
+import { createNetInfoMonitor } from "./netinfo";
+import { createQueuePersistence } from "./persistence";
 
 export type SerializedOperation = {
   query: string;
   variables?: Record<string, unknown>;
   operationName?: string;
   extensions?: Record<string, unknown>;
-};
-
-type OperationLike = {
-  query: unknown;
-  variables?: Record<string, unknown>;
-  operationName?: string;
-  extensions?: Record<string, unknown>;
-  setContext: (next: unknown) => void;
-  getContext: () => Record<string, unknown>;
-  client?: unknown;
-  [key: string]: unknown;
-};
-
-type NetInfoState = {
-  isConnected?: boolean | null;
-  isInternetReachable?: boolean | null;
-};
-
-type NetInfoLike = {
-  addEventListener: (
-    listener: (state: NetInfoState) => void
-  ) => (() => void) | { remove?: () => void };
-  fetch?: () => Promise<NetInfoState>;
-};
-
-type AsyncStorageLike = {
-  getItem: (key: string) => Promise<string | null>;
-  setItem: (key: string, value: string) => Promise<void>;
-  removeItem?: (key: string) => Promise<void>;
-};
-
-type StoredQueueItem = {
-  id: string;
-  addedAt: number;
-  operation: SerializedOperation;
 };
 
 type LinkObserver = {
@@ -54,14 +26,14 @@ type LinkObserver = {
 type QueueItem = {
   id: string;
   addedAt: number;
-  operation: OperationLike | SerializedOperation;
+  operation: Operation | SerializedOperation;
   observer?: LinkObserver;
   serialized: SerializedOperation;
+  forward?: NextLink;
 };
 
 export type OfflineQueueLinkOptions = {
   persist?: boolean;
-  queueMutationsOnly?: boolean;
   queueOperations?: string[];
   initialOnline?: boolean;
   autoDetectOnline?: boolean;
@@ -69,7 +41,7 @@ export type OfflineQueueLinkOptions = {
   replayLogging?: boolean;
 };
 
-export type OfflineQueueLink = RequestHandler & {
+export type OfflineQueueLinkHandler = RequestHandler & {
   setOnline: (online: boolean) => void;
   isOnline: () => boolean;
   getQueueLength: () => number;
@@ -79,437 +51,273 @@ export type OfflineQueueLink = RequestHandler & {
 
 const DEFAULT_STORAGE_KEY = "apollo-offline-queue";
 
-type ForwardFunction = (operation: OperationLike) => Observable<FetchResult>;
+/**
+ * Apollo Link that queues selected operations while offline.
+ * - Omit `queueOperations` to allow all operations to queue when offline.
+ * - Enable `persist` to keep the queue across app restarts (AsyncStorage).
+ * - Enable `autoDetectOnline` to listen to NetInfo and replay automatically.
+ */
+export class OfflineQueueLink extends ApolloLink {
+  private readonly storageKey = DEFAULT_STORAGE_KEY;
+  private readonly persist: boolean;
+  private readonly queueOperations?: string[];
+  private readonly autoDetectOnline: boolean;
+  private readonly logging: boolean;
+  private readonly replayLogging: boolean;
 
-export const createOfflineQueueLink = (
-  options: OfflineQueueLinkOptions = {}
-): OfflineQueueLink => {
-  let storage: AsyncStorageLike | undefined;
-  const storageKey = DEFAULT_STORAGE_KEY;
-  const {
-    persist = false,
-    queueMutationsOnly = true,
-    queueOperations,
-    autoDetectOnline = true,
-    initialOnline,
-    logging = false,
-    replayLogging = true,
-  } = options;
+  private online: boolean;
+  private queue: QueueItem[] = [];
+  private lastForward?: NextLink;
+  private lastClient?: unknown;
+  private initError?: Error;
+  private netInfo?: { ensureOnline: (currentOnline: boolean) => Promise<boolean>; dispose: () => void };
+  private flushing = false;
+  private idCounter = 0;
 
-  let online = initialOnline ?? (autoDetectOnline ? false : true);
+  private persistence: ReturnType<typeof createQueuePersistence>;
 
-  let queue: QueueItem[] = [];
-  let forwardFn: ForwardFunction | undefined;
-  let lastClient: unknown;
-  let initError: Error | undefined;
-  let netInfoUnsubscribe: (() => void) | undefined;
-  let netInfoInstance: NetInfoLike | undefined;
-  let flushing = false;
-  let idCounter = 0;
+  private readonly readyPromise: Promise<void>;
 
-  const readyPromise = initialize().catch((error) => {
-    initError = error instanceof Error ? error : new Error(String(error));
-  });
+  constructor(options: OfflineQueueLinkOptions = {}) {
+    super();
 
-  const setOnline = (nextOnline: boolean) => {
-    online = nextOnline;
-    log("setOnline", { online: nextOnline });
+    const {
+      persist = false,
+      queueOperations,
+      autoDetectOnline = true,
+      initialOnline,
+      logging = false,
+      replayLogging = true,
+    } = options;
+
+    this.persist = persist;
+    this.queueOperations = queueOperations;
+    this.autoDetectOnline = autoDetectOnline;
+    this.logging = logging;
+    this.replayLogging = replayLogging;
+
+    this.online = initialOnline ?? (autoDetectOnline ? false : true);
+
+    // Enable persistence lazily in init to avoid calling storage without need.
+    this.persistence = createQueuePersistence({
+      enabled: persist,
+      storageKey: this.storageKey,
+      log: this.log,
+      isSerializedOperation: (value) => this.isSerializedOperation(value),
+    });
+
+    this.readyPromise = this.initialize().catch((error) => {
+      this.initError = error instanceof Error ? error : new Error(String(error));
+    });
+  }
+
+  // ApolloLink request hook
+  public request(operation: Operation, forward?: NextLink): Observable<FetchResult> | null {
+    if (!forward) {
+      return null;
+    }
+
+    this.lastForward = forward;
+    if (this.hasClient(operation)) {
+      this.lastClient = operation.client;
+    }
+
+    return new Observable<FetchResult>((observer) => {
+      let subscription: { unsubscribe?: () => void } | null = null;
+      let queued = false;
+
+      const start = async () => {
+        if (this.initError) {
+          observer.error?.(this.initError);
+          return;
+        }
+
+        if (this.isQueueable(operation)) {
+          await this.ensureOnlineBeforeSend();
+          if (this.shouldQueueNow(operation)) {
+            this.log("queue:enqueue", { operationName: operation.operationName });
+            this.enqueue(operation, observer, forward);
+            queued = true;
+            return;
+          }
+        }
+
+        subscription = forward(operation).subscribe({
+          next: (value) => observer.next?.(value),
+          error: (error) => {
+            if (this.shouldQueueOnError(operation, error)) {
+              this.log("queue:onError", { operationName: operation.operationName });
+              this.enqueue(operation, observer, forward, error);
+              this.setOnline(false);
+              queued = true;
+              return;
+            }
+            observer.error?.(error);
+          },
+          complete: () => observer.complete?.(),
+        });
+      };
+
+      void this.readyPromise.then(start).catch((error) => observer.error?.(error));
+
+      return () => {
+        subscription?.unsubscribe?.();
+        if (queued) {
+          this.removeFromQueueByObserver(observer);
+        }
+      };
+    });
+  }
+
+  public setOnline(nextOnline: boolean) {
+    this.online = nextOnline;
+    this.log("setOnline", { online: nextOnline });
     if (nextOnline) {
-      void flushQueue();
+      void this.flushQueue();
     }
-  };
+  }
 
-  const isOnline = () => online;
+  public isOnline() {
+    return this.online;
+  }
 
-  const getQueueLength = () => queue.length;
+  public getQueueLength() {
+    return this.queue.length;
+  }
 
-  const dispose = () => {
-    netInfoUnsubscribe?.();
-    netInfoUnsubscribe = undefined;
-  };
+  public dispose() {
+    this.netInfo?.dispose();
+    this.netInfo = undefined;
+  }
 
-  const flushQueue = async () => {
-    await readyPromise;
-    if (initError) {
+  public async flushQueue() {
+    await this.readyPromise;
+    if (this.initError || !this.online || this.flushing) {
       return;
     }
-    if (!forwardFn || !online || flushing) {
-      return;
-    }
 
-    flushing = true;
+    this.flushing = true;
     try {
-      log("flush:start", { size: queue.length });
-      while (queue.length > 0 && online) {
-        const item = queue[0];
-        const operation = getOperationForItem(item);
-        const result = await executeOperation(operation, item.observer);
+      this.log("flush:start", { size: this.queue.length });
+      while (this.queue.length > 0 && this.online) {
+        const item = this.queue[0];
+        const operation = this.getOperationForItem(item);
+        const result = await this.executeOperation(operation, item.observer, item.forward);
 
         if (result.success) {
-          queue.shift();
-          await persistQueue();
+          this.queue.shift();
+          await this.persistence.persistQueue(this.queue);
           continue;
         }
 
         if (result.isNetworkError) {
-          log("flush:paused", { reason: "network-error" });
+          this.log("flush:paused", { reason: "network-error" });
           break;
         }
 
-        queue.shift();
-        await persistQueue();
+        this.queue.shift();
+        await this.persistence.persistQueue(this.queue);
       }
-      log("flush:done", { size: queue.length });
+      this.log("flush:done", { size: this.queue.length });
     } finally {
-      flushing = false;
+      this.flushing = false;
     }
-  };
+  }
 
-  const handler: OfflineQueueLink = Object.assign(
-    (operation: OperationLike, forward: ForwardFunction) => {
-      if (!forwardFn) {
-        forwardFn = forward;
-      }
-      if (hasClient(operation)) {
-        lastClient = operation.client;
-      }
+  // Queueing rules
+  private shouldQueueNow(operation: Operation) {
+    return this.isQueueable(operation) && !this.online;
+  }
 
-      return new Observable<FetchResult>((observer) => {
-        let subscription: { unsubscribe?: () => void } | null = null;
-        let queued = false;
+  private shouldQueueOnError(operation: Operation, error: unknown) {
+    return this.isQueueable(operation) && this.isNetworkError(error);
+  }
 
-        const start = async () => {
-          if (initError) {
-            observer.error?.(initError);
-            return;
-          }
-
-          if (shouldRetryOperation(operation)) {
-            const canSend = await ensureOnlineBeforeSend();
-            if (!canSend && shouldQueueNow(operation)) {
-              log("queue:enqueue", { operationName: operation.operationName });
-              enqueue(operation, observer);
-              queued = true;
-              return;
-            }
-          }
-
-          if (shouldQueueNow(operation)) {
-            log("queue:enqueue", { operationName: operation.operationName });
-            enqueue(operation, observer);
-            queued = true;
-            return;
-          }
-
-          subscription = forward(operation).subscribe({
-            next: (value) => observer.next?.(value),
-            error: (error) => {
-              if (shouldQueueOnError(operation, error)) {
-                log("queue:onError", {
-                  operationName: operation.operationName,
-                });
-                enqueue(operation, observer, error);
-                setOnline(false);
-                queued = true;
-                return;
-              }
-              observer.error?.(error);
-            },
-            complete: () => observer.complete?.(),
-          });
-        };
-
-        void readyPromise.then(start).catch((error) => observer.error?.(error));
-
-        return () => {
-          if (subscription?.unsubscribe) {
-            subscription.unsubscribe();
-          }
-          if (queued) {
-            removeFromQueueByObserver(observer);
-          }
-        };
-      });
-    },
-    { setOnline, isOnline, getQueueLength, flushQueue, dispose }
-  );
-
-  return handler;
-
-  function shouldQueueNow(operation: OperationLike) {
-    if (!shouldRetryOperation(operation)) {
-      return false;
-    }
-
-    if (!online && isRetryableOperation(operation)) {
+  private isQueueable(operation: Operation) {
+    if (!this.queueOperations || this.queueOperations.length === 0) {
       return true;
     }
 
-    return false;
-  }
-
-  function shouldQueueOnError(operation: OperationLike, error: unknown) {
-    if (!shouldRetryOperation(operation)) {
-      return false;
-    }
-
-    if (!isRetryableOperation(operation)) {
-      return false;
-    }
-
-    return isNetworkError(error);
-  }
-
-  function shouldRetryOperation(operation: OperationLike) {
-    if (!queueOperations || queueOperations.length === 0) {
-      return true;
-    }
-
-    if (!operation.operationName) {
-      return false;
-    }
-
-    return queueOperations.includes(operation.operationName);
-  }
-
-  function isRetryableOperation(operation: OperationLike) {
-    if (queueOperations && operation.operationName) {
-      return queueOperations.includes(operation.operationName);
-    }
-
-    if (!queueMutationsOnly) {
-      return true;
-    }
-
-    const definition = getMainDefinition(operation.query);
-    return (
-      definition.kind === "OperationDefinition" &&
-      definition.operation === "mutation"
+    return Boolean(
+      operation.operationName && this.queueOperations.includes(operation.operationName)
     );
   }
 
-  function isNetworkError(error: unknown) {
-    if (hasProperty(error, "networkError")) {
-      const networkError = error.networkError;
-      if (typeof networkError === "string") {
-        return isNetworkMessage(networkError);
-      }
-      if (hasProperty(networkError, "message")) {
-        const message = networkError.message;
-        if (typeof message === "string") {
-          return isNetworkMessage(message);
-        }
-      }
-      return Boolean(networkError);
-    }
-
-    if (hasProperty(error, "message") && typeof error.message === "string") {
-      return isNetworkMessage(error.message);
-    }
-
-    return false;
-  }
-
-  function isNetworkMessage(message: string) {
-    return (
-      message.includes("Network request failed") ||
-      message.includes("Network request timed out") ||
-      message.includes("Failed to fetch") ||
-      message.includes("Network Error")
-    );
-  }
-
-  function enqueue(
-    operation: OperationLike,
+  // Queue storage
+  private enqueue(
+    operation: Operation,
     observer?: LinkObserver,
+    forward?: NextLink,
     error?: unknown
   ) {
-    const serialized = serializeOperation(operation);
+    const serialized = this.serializeOperation(operation);
     const item: QueueItem = {
-      id: nextId(),
+      id: this.nextId(),
       addedAt: Date.now(),
       operation,
       observer,
       serialized,
+      forward,
     };
 
-    queue.push(item);
-    log("queue:added", { size: queue.length, operationName: operation.operationName });
-    void persistQueue();
+    this.queue.push(item);
+    this.log("queue:added", {
+      size: this.queue.length,
+      operationName: operation.operationName,
+    });
+    void this.persistence.persistQueue(this.queue);
 
-    if (error && !isNetworkError(error)) {
+    if (error && !this.isNetworkError(error)) {
       observer?.error?.(error);
     }
   }
 
-  function removeFromQueueByObserver(observer: LinkObserver) {
-    const index = queue.findIndex((item) => item.observer === observer);
+  private removeFromQueueByObserver(observer: LinkObserver) {
+    const index = this.queue.findIndex((item) => item.observer === observer);
     if (index === -1) {
       return;
     }
 
-    queue.splice(index, 1);
-    log("queue:removed", { size: queue.length });
-    void persistQueue();
+    this.queue.splice(index, 1);
+    this.log("queue:removed", { size: this.queue.length });
+    void this.persistence.persistQueue(this.queue);
   }
 
-  async function initialize() {
-    log("init:start");
-    if (persist) {
-      storage = await loadAsyncStorage();
+  // Init lifecycle
+  private async initialize() {
+    this.log("init:start");
+
+    const storedItems = await this.persistence.hydrateQueue();
+    for (const entry of storedItems) {
+      this.queue.push({
+        id: entry.id,
+        addedAt: entry.addedAt,
+        operation: entry.operation,
+        serialized: entry.operation,
+      });
     }
 
-    await hydrateQueue();
-
-    if (autoDetectOnline) {
-      void setupNetInfo();
+    if (this.autoDetectOnline) {
+      this.netInfo = await createNetInfoMonitor({
+        enabled: true,
+        setOnline: (online) => this.setOnline(online),
+        log: this.log,
+      });
     }
-    log("init:ready", { online, size: queue.length });
+
+    this.log("init:ready", { online: this.online, size: this.queue.length });
   }
 
-  async function loadAsyncStorage() {
-    const module = await import("@react-native-async-storage/async-storage");
-    const candidate = module.default ?? module;
-
-    if (!isAsyncStorage(candidate)) {
-      throw new Error(
-        "AsyncStorage is not available. Install @react-native-async-storage/async-storage."
-      );
+  // NetInfo and explicit setOnline both flow through this.
+  private async ensureOnlineBeforeSend() {
+    if (!this.netInfo) {
+      return this.online;
     }
-
-    return candidate;
+    return this.netInfo.ensureOnline(this.online);
   }
 
-  async function setupNetInfo() {
-    if (netInfoUnsubscribe) {
-      return;
-    }
-
-    const instance = await loadNetInfo();
-    if (!instance) {
-      return;
-    }
-    netInfoInstance = instance;
-
-    if (instance.fetch) {
-      try {
-        const state = await instance.fetch();
-        updateOnlineFromState(state);
-      } catch {
-        // Ignore fetch failures; listener will still update when possible.
-      }
-    }
-
-    const unsubscribe = instance.addEventListener((state) => {
-      updateOnlineFromState(state);
-    });
-    netInfoUnsubscribe =
-      typeof unsubscribe === "function"
-        ? unsubscribe
-        : () => unsubscribe.remove?.();
-  }
-
-  async function loadNetInfo(): Promise<NetInfoLike | undefined> {
-    try {
-      const module = await import("@react-native-community/netinfo");
-      const candidate = module.default ?? module;
-      if (isNetInfo(candidate)) {
-        return candidate;
-      }
-    } catch {
-      return undefined;
-    }
-
-    return undefined;
-  }
-
-  async function ensureOnlineBeforeSend() {
-    if (!netInfoInstance?.fetch) {
-      return online;
-    }
-
-    try {
-      const state = await netInfoInstance.fetch();
-      if (typeof state.isInternetReachable === "boolean") {
-        setOnline(state.isInternetReachable);
-        return state.isInternetReachable;
-      }
-      if (state.isConnected === false) {
-        setOnline(false);
-        return false;
-      }
-    } catch {
-      return online;
-    }
-
-    return online;
-  }
-
-  function updateOnlineFromState(state: NetInfoState) {
-    if (typeof state.isInternetReachable === "boolean") {
-      log("netinfo", { online: state.isInternetReachable, source: "reachable" });
-      setOnline(state.isInternetReachable);
-      return;
-    }
-
-    if (state.isConnected === false) {
-      log("netinfo", { online: false, source: "connected:false" });
-      setOnline(false);
-    }
-  }
-
-  async function hydrateQueue() {
-    if (!storage) {
-      return;
-    }
-
-    const raw = await storage.getItem(storageKey);
-    if (!raw) {
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
-        throw new Error("Invalid queue payload");
-      }
-
-      for (const entry of parsed) {
-        if (!isStoredQueueItem(entry)) {
-          throw new Error("Invalid queue payload");
-        }
-        queue.push({
-          id: entry.id,
-          addedAt: entry.addedAt,
-          operation: entry.operation,
-          serialized: entry.operation,
-        });
-      }
-    } catch {
-      await storage.removeItem?.(storageKey);
-    }
-  }
-
-  async function persistQueue() {
-    if (!storage) {
-      return;
-    }
-
-    const stored: StoredQueueItem[] = queue.map((item) => ({
-      id: item.id,
-      addedAt: item.addedAt,
-      operation: item.serialized,
-    }));
-
-    if (stored.length === 0) {
-      await storage.removeItem?.(storageKey);
-      return;
-    }
-
-    await storage.setItem(storageKey, JSON.stringify(stored));
-  }
-
-  function serializeOperation(operation: OperationLike): SerializedOperation {
+  // Serialization
+  private serializeOperation(operation: Operation): SerializedOperation {
     return {
       query: print(operation.query),
       variables: operation.variables,
@@ -518,21 +326,21 @@ export const createOfflineQueueLink = (
     };
   }
 
-  function getOperationForItem(item: QueueItem): OperationLike {
-    if (isSerializedOperation(item.operation)) {
-      return deserializeOperation(item.operation);
+  private getOperationForItem(item: QueueItem): Operation {
+    if (this.isSerializedOperation(item.operation)) {
+      return this.deserializeOperation(item.operation);
     }
 
     return item.operation;
   }
 
-  function isSerializedOperation(operation: unknown): operation is SerializedOperation {
+  private isSerializedOperation(operation: unknown): operation is SerializedOperation {
     return (
-      hasProperty(operation, "query") && typeof operation.query === "string"
+      this.hasProperty(operation, "query") && typeof operation.query === "string"
     );
   }
 
-  function deserializeOperation(serialized: SerializedOperation): OperationLike {
+  private deserializeOperation(serialized: SerializedOperation): Operation {
     const context: Record<string, unknown> = {};
     return {
       query: gql(serialized.query),
@@ -548,97 +356,107 @@ export const createOfflineQueueLink = (
     };
   }
 
-  async function executeOperation(
-    operation: OperationLike,
-    observer?: LinkObserver
+  // Execution
+  private async executeOperation(
+    operation: Operation,
+    observer?: LinkObserver,
+    forward?: NextLink
   ) {
-    if (!forwardFn) {
-      return { success: false, isNetworkError: false };
+    const next = forward ?? this.lastForward;
+    if (!next) {
+      return { success: false, isNetworkError: true };
     }
 
-    if (!hasClient(operation)) {
-      if (lastClient !== undefined) {
-        operation.client = lastClient;
+    if (!this.hasClient(operation)) {
+      if (this.lastClient !== undefined) {
+        operation.client = this.lastClient;
       } else {
-        log("forward:skip", { reason: "missing-client" });
+        this.log("forward:skip", { reason: "missing-client" });
         return { success: false, isNetworkError: true };
       }
     }
 
-    logReplay(operation);
-    log("forward:start", { operationName: operation.operationName });
+    this.logReplay(operation);
+    this.log("forward:start", { operationName: operation.operationName });
     return new Promise<{ success: boolean; isNetworkError: boolean }>((resolve) => {
-      forwardFn(operation).subscribe({
+      next(operation).subscribe({
         next: (value) => observer?.next?.(value),
         error: (error) => {
           observer?.error?.(error);
-          log("forward:error", {
+          this.log("forward:error", {
             operationName: operation.operationName,
-            networkError: isNetworkError(error),
+            networkError: this.isNetworkError(error),
             message:
-              hasProperty(error, "message") && typeof error.message === "string"
+              this.hasProperty(error, "message") && typeof error.message === "string"
                 ? error.message
                 : undefined,
             networkMessage:
-              hasProperty(error, "networkError") &&
-              hasProperty(error.networkError, "message") &&
+              this.hasProperty(error, "networkError") &&
+              this.hasProperty(error.networkError, "message") &&
               typeof error.networkError.message === "string"
                 ? error.networkError.message
                 : undefined,
           });
-          resolve({ success: false, isNetworkError: isNetworkError(error) });
+          resolve({ success: false, isNetworkError: this.isNetworkError(error) });
         },
         complete: () => {
           observer?.complete?.();
-          log("forward:complete", { operationName: operation.operationName });
+          this.log("forward:complete", { operationName: operation.operationName });
           resolve({ success: true, isNetworkError: false });
         },
       });
     });
   }
 
-  function nextId() {
-    idCounter += 1;
-    return `${Date.now()}-${idCounter}`;
+  // Error detection
+  private isNetworkError(error: unknown) {
+    if (this.hasProperty(error, "networkError")) {
+      const networkError = error.networkError;
+      if (typeof networkError === "string") {
+        return this.isNetworkMessage(networkError);
+      }
+      if (this.hasProperty(networkError, "message")) {
+        const message = networkError.message;
+        if (typeof message === "string") {
+          return this.isNetworkMessage(message);
+        }
+      }
+      return Boolean(networkError);
+    }
+
+    if (this.hasProperty(error, "message") && typeof error.message === "string") {
+      return this.isNetworkMessage(error.message);
+    }
+
+    return false;
   }
 
-  function hasProperty(
-    value: unknown,
-    key: string
-  ): value is Record<string, unknown> {
+  private isNetworkMessage(message: string) {
+    return (
+      message.includes("Network request failed") ||
+      message.includes("Network request timed out") ||
+      message.includes("Failed to fetch") ||
+      message.includes("Network Error")
+    );
+  }
+
+  // Helpers
+  private nextId() {
+    this.idCounter += 1;
+    return `${Date.now()}-${this.idCounter}`;
+  }
+
+  private hasProperty(value: unknown, key: string): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && key in value;
   }
 
-  function hasClient(operation: OperationLike): operation is OperationLike {
-    return hasProperty(operation, "client") && operation.client !== undefined;
+  private hasClient(operation: Operation) {
+    return this.hasProperty(operation, "client") && operation.client !== undefined;
   }
 
-  function isAsyncStorage(value: unknown): value is AsyncStorageLike {
-    return (
-      hasProperty(value, "getItem") &&
-      typeof value.getItem === "function" &&
-      hasProperty(value, "setItem") &&
-      typeof value.setItem === "function"
-    );
-  }
-
-  function isNetInfo(value: unknown): value is NetInfoLike {
-    return hasProperty(value, "addEventListener");
-  }
-
-  function isStoredQueueItem(value: unknown): value is StoredQueueItem {
-    return (
-      hasProperty(value, "id") &&
-      typeof value.id === "string" &&
-      hasProperty(value, "addedAt") &&
-      typeof value.addedAt === "number" &&
-      hasProperty(value, "operation") &&
-      isSerializedOperation(value.operation)
-    );
-  }
-
-  function log(event: string, details?: Record<string, unknown>) {
-    if (!logging) {
+  // Logging
+  private log = (event: string, details?: Record<string, unknown>) => {
+    if (!this.logging) {
       return;
     }
     if (details) {
@@ -646,14 +464,14 @@ export const createOfflineQueueLink = (
       return;
     }
     console.log(`[apollo-offline-link] ${event}`);
-  }
+  };
 
-  function logReplay(operation: OperationLike) {
-    if (!replayLogging) {
+  private logReplay(operation: Operation) {
+    if (!this.replayLogging) {
       return;
     }
     console.log(`[apollo-offline-link] replay`, {
       operationName: operation.operationName,
     });
   }
-};
+}

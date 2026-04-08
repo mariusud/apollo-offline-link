@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { gql, Observable, Operation } from "@apollo/client";
-import { createOfflineQueueLink } from "../src/OfflineQueueLink";
+import { gql } from "@apollo/client";
+import type { Operation } from "@apollo/client/link/core";
+import { Observable } from "@apollo/client/utilities";
+import { OfflineQueueLink } from "../src/OfflineQueueLink";
 
 const asyncStorageMock = {
   getItem: vi.fn(async () => null),
@@ -61,8 +63,8 @@ const createForward = (handler: (op: Operation) => Observable<unknown>) =>
   vi.fn((op: Operation) => handler(op));
 
 describe("OfflineQueueLink", () => {
-  it("queues mutations while offline and replays when online", async () => {
-    const link = createOfflineQueueLink({ initialOnline: false });
+  it("queues operations while offline and replays when online", async () => {
+    const link = new OfflineQueueLink({ initialOnline: false });
     const forward = createForward((op) =>
       new Observable((observer) => {
         observer.next({ data: { ok: true, name: op.operationName } });
@@ -87,8 +89,8 @@ describe("OfflineQueueLink", () => {
     expect(events.complete).toBe(1);
   });
 
-  it("queues mutation on network error", async () => {
-    const link = createOfflineQueueLink();
+  it("queues operation on network error", async () => {
+    const link = new OfflineQueueLink();
     const forward = createForward(() =>
       new Observable((observer) => {
         observer.error({ networkError: new Error("offline") });
@@ -105,7 +107,7 @@ describe("OfflineQueueLink", () => {
   });
 
   it("skips queueing when operation is not in queueOperations", async () => {
-    const link = createOfflineQueueLink({
+    const link = new OfflineQueueLink({
       initialOnline: false,
       queueOperations: ["KeepMe"],
     });
@@ -122,8 +124,8 @@ describe("OfflineQueueLink", () => {
     expect(link.getQueueLength()).toBe(0);
   });
 
-  it("queues a listed query even when mutation-only is enabled", async () => {
-    const link = createOfflineQueueLink({
+  it("queues a listed query when it matches queueOperations", async () => {
+    const link = new OfflineQueueLink({
       initialOnline: false,
       queueOperations: ["HeatmapQuery"],
     });
@@ -140,9 +142,9 @@ describe("OfflineQueueLink", () => {
     expect(link.getQueueLength()).toBe(1);
   });
 
-  it("persists queued mutations when persist is enabled", async () => {
+  it("persists queued operations when persist is enabled", async () => {
     asyncStorageMock.getItem.mockResolvedValueOnce(null);
-    const link = createOfflineQueueLink({
+    const link = new OfflineQueueLink({
       initialOnline: false,
       persist: true,
     });

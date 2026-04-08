@@ -18,10 +18,11 @@
     - Python implementation
 -->
 <!-- Captured from user request -->
-- Build a new Apollo Link package (not an app)
-- React Native target, TypeScript
-- Link should queue mutations when offline or network error occurs
-- Retry queued mutations when connectivity returns
+- Reduce code size while improving readability.
+- Keep NetInfo integration, persistence, and logging.
+- Queue only operations named in `queueOperations` (or all if list omitted).
+- Add comments and proper documentation.
+- Consider splitting persistence and NetInfo into separate modules.
 
 ## Research Findings
 <!-- 
@@ -34,11 +35,8 @@
     - Standard pattern: python script.py <command> [args]
 -->
 <!-- Key discoveries during exploration -->
-- Reference inspiration: apollo-link-queue (queueing until online)
-- Current README/examples require manual NetInfo.addEventListener wiring and explicit storage adapter.
-- OfflineQueueLink only accepts a QueueStorage object today; no string shorthand for AsyncStorage.
-- Apollo Client v4 types define `ApolloLink.from(links: ApolloLink[])` and `ApolloLink.RequestHandler`, so custom handlers should be wrapped with `new ApolloLink(handler)` in v4.
-- Community links page lists Apollo link packages with apollo-link/graphql naming; package metadata should emphasize link usage and RN/offline focus.
+- `src/OfflineQueueLink.ts` currently mixes queueing, NetInfo, persistence, serialization, execution, and logging.
+- README references a removed `queueMutationsOnly` option and needs alignment with current behavior.
 
 ## Technical Decisions
 <!-- 
@@ -52,18 +50,8 @@
 <!-- Decisions made with rationale -->
 | Decision | Rationale |
 |----------|-----------|
-| Target React Native only | User requirement |
-| Plain TypeScript with tsc build | User preference for plain TS |
-| Queue mutations only by default | Avoid retrying queries and keep behavior aligned with offline mutations |
-| Optional storage adapter for persistence | Works with AsyncStorage without hard dependency |
-| Retry on network errors or when explicitly offline | Matches offline-first mutation semantics |
-| Auto-detect NetInfo when available | Removes manual NetInfo wiring while keeping a fallback for manual control |
-| Support storage: "async-storage" shorthand | Simplifies setup for common RN storage usage |
-| Expose queue snapshot | Improves inspectability without adding dependencies |
-| Export RequestHandler-based link factory | Avoids ApolloLink class type mismatch in monorepos |
-| Simplify API, remove custom storage adapters and context whitelist | Reduce surface area and enforce AsyncStorage-only persistence |
-| Add queueOperations filter | Allow callers to control which operations are queued/retried |
-| Persist option instead of storage selector | Simple boolean to opt into AsyncStorage persistence |
+| Split persistence and NetInfo into dedicated modules | Make concerns clear and code easier to read/test |
+| Switch to class-based `OfflineQueueLink` export | Matches desired API and ApolloLink usage |
 
 ## Issues Encountered
 <!-- 
@@ -88,8 +76,10 @@
     - Project structure: src/main.py, src/utils.py
 -->
 <!-- URLs, file paths, API references -->
-- https://github.com/helfer/apollo-link-queue
-- https://graphqlzero.almansi.me/api
+- `src/OfflineQueueLink.ts`
+- `src/persistence.ts`
+- `src/netinfo.ts`
+- `README.md`
 
 ## Visual/Browser Findings
 <!-- 

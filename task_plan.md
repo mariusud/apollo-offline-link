@@ -1,4 +1,4 @@
-# Task Plan: Apollo Offline Queue Link (React Native)
+# Task Plan: Simplify Offline Queue Link
 <!-- 
   WHAT: This is your roadmap for the entire task. Think of it as your "working memory on disk."
   WHY: After 50+ tool calls, your original goals can get forgotten. This file keeps them fresh.
@@ -11,14 +11,14 @@
   WHY: This is your north star. Re-reading this keeps you focused on the end state.
   EXAMPLE: "Create a Python CLI todo app with add, list, and delete functionality."
 -->
-Create a TypeScript Apollo Link package for React Native that queues failed mutations while offline and retries when connectivity returns.
+Refactor the offline queue link to be smaller, clearer, and better documented, while keeping NetInfo, persistence, and logging, and splitting concerns into readable modules.
 
 ## Current Phase
 <!-- 
   WHAT: Which phase you're currently working on (e.g., "Phase 1", "Phase 3").
   WHY: Quick reference for where you are in the task. Update this as you progress.
 -->
-Phase 4
+Phase 3
 
 ## Phases
 <!-- 
@@ -60,8 +60,8 @@ Phase 4
 -->
 - [x] Execute the plan step by step
 - [x] Write code to files before executing
-- [x] Test incrementally
-- **Status:** complete
+- [ ] Test incrementally
+- **Status:** in_progress
 
 ### Phase 4: Testing & Verification
 <!-- 
@@ -71,7 +71,7 @@ Phase 4
 - [ ] Verify all requirements met
 - [ ] Document test results in progress.md
 - [ ] Fix any issues found
-- **Status:** in_progress
+- **Status:** pending
 
 ### Phase 5: Delivery
 <!-- 
@@ -91,8 +91,8 @@ Phase 4
     1. Should tasks persist between sessions? (Yes - need file storage)
     2. What format for storing tasks? (JSON file)
 -->
-1. How should mutations be persisted/queued in a RN-friendly way (memory vs storage hook)?
-2. What signal should trigger retry (NetInfo, manual trigger, or both)?
+1. What minimal behaviors must remain while keeping NetInfo, persistence, and logging?
+2. What module split (NetInfo/persistence) keeps the API stable and readable?
 
 ## Decisions Made
 <!-- 
@@ -104,7 +104,8 @@ Phase 4
 -->
 | Decision | Rationale |
 |----------|-----------|
-| Package is plain TypeScript with tsc output | User requested plain TS, RN target |
+| Split persistence and NetInfo into separate modules | Clarify responsibilities and improve readability |
+| Switch to class-based `OfflineQueueLink` export | Aligns with requested API and simplifies usage |
 
 ## Errors Encountered
 <!-- 
@@ -117,7 +118,7 @@ Phase 4
 -->
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| create-expo-app timed out during npm install | 1 | Continued after confirming app scaffolded |
+|       | 1       |            |
 
 ## Notes
 <!-- 

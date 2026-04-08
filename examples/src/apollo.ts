@@ -1,7 +1,7 @@
 import { ApolloClient, ApolloLink, HttpLink, InMemoryCache } from "@apollo/client";
-import { createOfflineQueueLink } from "apollo-offline-queue-link";
+import { OfflineQueueLink } from "apollo-offline-queue-link";
 
-export const offlineLink = createOfflineQueueLink({
+export const offlineLink = new OfflineQueueLink({
   persist: true,
   queueOperations: ["CreatePost"],
 });
