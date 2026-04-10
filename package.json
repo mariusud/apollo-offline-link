@@ -1,9 +1,14 @@
 {
-  "name": "apollo-offline-queue-link",
-  "version": "0.1.0",
+  "name": "apollo-offline-link",
+  "version": "1.0.0",
   "description": "A link that queues offline operations and retries when back online",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mariusud/apollo-offline-link.git"
+  },
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "react-native": "src/index.ts",
   "keywords": [
     "graphql",
@@ -31,12 +36,11 @@
   },
   "peerDependencies": {
     "@apollo/client": "^4.0.0",
-    "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-community/netinfo": "^11.3.2",
     "graphql": "^15.0.0 || ^16.0.0"
   },
   "devDependencies": {
-    "@apollo/client": "^4.1.6",
+    "@apollo/client": "^4.0.0",
     "@types/node": "^22.0.0",
     "graphql": "^16.13.2",
     "typescript": "^5.0.0",

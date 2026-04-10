@@ -5,11 +5,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 /dist
-/examples/expo-demo/.expo
-
-# Expo
-.expo-shared
-.expo
+/examples
 
 # Logs
 logs

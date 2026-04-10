@@ -3,10 +3,8 @@ import { Observable } from "rxjs";
 
 import NetInfo from "@react-native-community/netinfo";
 import { ApolloLink } from "@apollo/client";
-import { GraphQLFormattedError } from "graphql";
 
 type OfflineQueueLinkOptions = {
-  storageKey?: string;
   watchOperations: string[];
 };
 
@@ -32,7 +30,7 @@ export default class OfflineQueueLink extends ApolloLink {
     // Subscribe to network status changes
     NetInfo.addEventListener((state) => {
       this.isOnline = state.isInternetReachable === true;
-      this.log("isOnline change: ", {
+      this.log("netinfo state: ", {
         state,
       });
 
@@ -126,12 +124,6 @@ export default class OfflineQueueLink extends ApolloLink {
         // got a successful response,
         // if offline, go "online" and replay queue
         next: (result) => {
-          if (result.errors) {
-            result.errors.forEach((error: GraphQLFormattedError) => {
-              console.log("GraphQL error:", error);
-            });
-          }
-
           if (!this.isOnline) {
             this.log("Successful response while offline, marking as online");
             this.isOnline = true;
