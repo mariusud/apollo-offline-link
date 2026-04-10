@@ -1,19 +1,16 @@
 import type { Observer } from "rxjs";
 import { Observable } from "rxjs";
 
-import { uuid } from "expo-modules-core";
-import NetInfo, { fetch } from "@react-native-community/netinfo";
+import NetInfo from "@react-native-community/netinfo";
 import { ApolloLink } from "@apollo/client";
-
-const DEFAULT_STORAGE_KEY = "apollo-offline-queue";
+import { GraphQLFormattedError } from "graphql";
 
 type OfflineQueueLinkOptions = {
   storageKey?: string;
+  watchOperations: string[];
 };
 
 interface QueueItem {
-  id: string;
-  addedAt: number;
   operation: ApolloLink.Operation;
   forward: ApolloLink.ForwardFunction;
   observer: Observer<ApolloLink.Result>;
@@ -25,14 +22,19 @@ interface QueueItem {
 export default class OfflineQueueLink extends ApolloLink {
   private isOnline: boolean;
   private queue: QueueItem[] = [];
+  private watchedOperations: Set<string>;
 
   constructor(options?: OfflineQueueLinkOptions) {
     super();
     this.isOnline = true;
+    this.watchedOperations = new Set(options?.watchOperations);
 
     // Subscribe to network status changes
     NetInfo.addEventListener((state) => {
-      this.isOnline = state.isInternetReachable ?? false;
+      this.isOnline = state.isInternetReachable === true;
+      this.log("isOnline change: ", {
+        state,
+      });
 
       if (this.isOnline) {
         this.replayQueue();
@@ -41,37 +43,33 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   private log(event: string, details?: Record<string, unknown>) {
-    console.log(`[OfflineQueueLink] ${event}`, details);
+    console.log(`[OfflineQueueLink] ${event}`, ...(details ? [details] : []));
   }
 
-  private getNetworkState() {
-    fetch().then((state) => {
-      this.log("netinfo", {
-        isInternetReachable: state.isInternetReachable,
-        type: state.type,
-      });
-      this.isOnline = state.isInternetReachable ?? false;
-    });
+  private isNetworkError(error: unknown) {
+    const message = (error as Error | undefined)?.message ?? "";
+    return /network request (failed|timed out)|failed to fetch/i.test(message);
+  }
+
+  private isWatchedOperation(operation: ApolloLink.Operation) {
+    return this.watchedOperations.has(operation.operationName || "");
   }
 
   // queue functionality
   private enqueue(item: QueueItem) {
     this.queue.push(item);
 
-    this.log("queue:enqueue", {
-      id: item.id,
-      addedAt: item.addedAt,
-      size: this.queue.length,
+    this.log("Added item to queue", {
+      name: item.operation.operationName,
+      variables: item.operation.variables,
     });
   }
 
   private async replayQueue() {
-    this.log("queue:replay:start", { size: this.queue.length });
-
     while (this.queue.length > 0) {
+      this.log("Attempting to replay queue", { size: this.queue.length });
       const item = this.queue.shift()!;
       try {
-        this.log("queue:replay:item", { id: item.id, addedAt: item.addedAt });
         const result = await new Promise<ApolloLink.Result>(
           (resolve, reject) => {
             item.forward(item.operation).subscribe({
@@ -83,37 +81,38 @@ export default class OfflineQueueLink extends ApolloLink {
         );
         item.observer.next(result);
         item.observer.complete();
-        this.log("queue:replay:success", { id: item.id });
+        this.log("Successfully replayed item", {
+          name: item.operation.operationName,
+          variables: item.operation.variables,
+        });
       } catch (error) {
         item.observer.error(error);
-        this.log("queue:replay:error", {
-          id: item.id,
+        this.log("Failed to replay item", {
+          name: item.operation.operationName,
+          variables: item.operation.variables,
           error: (error as Error)?.message,
         });
       }
     }
-    this.log("queue:replay:done");
   }
 
-  // https://www.apollographql.com/docs/react/api/link/apollo-link#apollolinkrequest
+  // brief overview of the implementation:
+  // - if we're offline, add it to the queue with a timestamp
+  // - if we're online or not watching operation, just forward the operation as normal
+  // - if a watched operation fails with a network error, mark us as offline and add it to the queue
+  // - when we come back online, we replay the queued operations in order, waiting for each to complete before starting the next
   public request(
     operation: ApolloLink.Operation,
     forward: ApolloLink.ForwardFunction,
   ): Observable<ApolloLink.Result> {
-    // brief overview of the implementation:
-    // - if we're online, just forward the operation as normal
-    // - if we're offline, add it to the queue with a timestamp
-    // - when we come back online, we replay the queued operations in order, waiting for each to complete before starting the next
-
-    this.getNetworkState();
-
-    // offline, queue the operation
-    if (!this.isOnline) {
-      this.log("request:queued");
+    // offline and of interest, add to queue
+    if (!this.isOnline && this.isWatchedOperation(operation)) {
+      this.log("Offline, enqueuing operation", {
+        name: operation.operationName,
+        variables: operation.variables,
+      });
       return new Observable<ApolloLink.Result>((observer) => {
         this.enqueue({
-          id: uuid.v4(),
-          addedAt: Date.now(),
           operation,
           forward,
           observer,
@@ -121,8 +120,46 @@ export default class OfflineQueueLink extends ApolloLink {
       });
     }
 
-    // online, just forward the operation
-    this.log("request:forward");
-    return forward(operation);
+    // online or dont care operation, forward
+    return new Observable<ApolloLink.Result>((observer) => {
+      const subscription = forward(operation).subscribe({
+        // got a successful response,
+        // if offline, go "online" and replay queue
+        next: (result) => {
+          if (result.errors) {
+            result.errors.forEach((error: GraphQLFormattedError) => {
+              console.log("GraphQL error:", error);
+            });
+          }
+
+          if (!this.isOnline) {
+            this.log("Successful response while offline, marking as online");
+            this.isOnline = true;
+            this.replayQueue();
+          }
+          observer.next(result);
+        },
+        // Error
+        // if its watched and a network error, turn offline and queue
+        error: (error) => {
+          if (
+            this.isWatchedOperation(operation) &&
+            this.isNetworkError(error)
+          ) {
+            this.isOnline = false;
+            this.log("request:network-error:queued");
+            this.enqueue({
+              operation,
+              forward,
+              observer,
+            });
+            return;
+          }
+          observer.error(error);
+        },
+      });
+
+      return () => subscription.unsubscribe();
+    });
   }
 }
