@@ -1,7 +1,6 @@
 # Expo Demo
 
-This demo app shows offline mutation queueing with the offline link and uses
-`queueOperations` to limit retries to the `CreatePost` mutation.
+This demo app shows offline mutation queueing with the offline link.
 
 ## Install
 

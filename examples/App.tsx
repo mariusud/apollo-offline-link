@@ -2,7 +2,7 @@ import { ApolloProvider, gql, useMutation } from "@apollo/client";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { apolloClient, offlineLink } from "./src/apollo";
+import { apolloClient, getQueueLength, setForcedOffline as setLinkForcedOffline } from "./src/apollo";
 
 const CREATE_POST = gql`
   mutation CreatePost($title: String!, $body: String!) {
@@ -21,7 +21,7 @@ function DemoScreen() {
 
   useEffect(() => {
     const id = setInterval(() => {
-      setQueueLength(offlineLink.getQueueLength());
+      setQueueLength(getQueueLength());
     }, 300);
 
     return () => clearInterval(id);
@@ -32,7 +32,7 @@ function DemoScreen() {
       title: `Offline demo ${Date.now()}`,
       body: "Queued mutation",
     }),
-    []
+    [],
   );
 
   const handlePress = async () => {
@@ -52,7 +52,7 @@ function DemoScreen() {
   const handleToggleOffline = () => {
     const next = !forcedOffline;
     setForcedOffline(next);
-    offlineLink.setOnline(!next);
+    setLinkForcedOffline(next);
     setStatusMessage(next ? "Forced offline" : "Back online");
   };
 
