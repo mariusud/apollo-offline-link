@@ -46,7 +46,8 @@ By default, no operations are queued unless `watchOperations` is provided.
 
 ### Options
 
-- `watchOperations`: list of operation names to queue while offline (default: `[]`).
+- `watchOperations`: list of operation names to queue while offline.
+- `logging`: enable console logging (default: `false`).
 
 ## Notes
 

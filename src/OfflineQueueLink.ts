@@ -6,6 +6,7 @@ import { ApolloLink } from "@apollo/client";
 
 type OfflineQueueLinkOptions = {
   watchOperations: string[];
+  logging?: boolean;
 };
 
 interface QueueItem {
@@ -21,18 +22,18 @@ export default class OfflineQueueLink extends ApolloLink {
   private isOnline: boolean;
   private queue: QueueItem[] = [];
   private watchedOperations: Set<string>;
+  private isLoggingEnabled: boolean;
 
   constructor(options?: OfflineQueueLinkOptions) {
     super();
     this.isOnline = true;
     this.watchedOperations = new Set(options?.watchOperations);
+    this.isLoggingEnabled = options?.logging ?? false;
 
     // Subscribe to network status changes
     NetInfo.addEventListener((state) => {
       this.isOnline = state.isInternetReachable === true;
-      this.log("netinfo state: ", {
-        state,
-      });
+      this.log("netinfo - isInternetReachable? " + state.isInternetReachable);
 
       if (this.isOnline) {
         this.replayQueue();
@@ -41,6 +42,9 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   private log(event: string, details?: Record<string, unknown>) {
+    if (!this.isLoggingEnabled) {
+      return;
+    }
     console.log(`[OfflineQueueLink] ${event}`, ...(details ? [details] : []));
   }
 
