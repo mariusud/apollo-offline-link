@@ -1,6 +1,6 @@
 {
   "name": "apollo-offline-link",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A link that queues offline operations and retries when back online",
   "license": "MIT",
   "repository": {
