@@ -72,23 +72,26 @@ export default class OfflineQueueLink extends ApolloLink {
       this.log("Attempting to replay queue", { size: this.queue.length });
       const item = this.queue.shift()!;
       try {
-        const result = await new Promise<ApolloLink.Result>(
-          (resolve, reject) => {
-            item.forward(item.operation).subscribe({
-              next: resolve,
-              error: reject,
-              complete: () => {},
-            });
-          },
-        );
-        item.observer.next(result);
-        item.observer.complete();
+        await new Promise<void>((resolve, reject) => {
+          item.forward(item.operation).subscribe({
+            next: (result) => {
+              item.observer.next(result);
+            },
+            error: (error) => {
+              item.observer.error(error);
+              reject(error);
+            },
+            complete: () => {
+              item.observer.complete();
+              resolve();
+            },
+          });
+        });
         this.log("Successfully replayed item", {
           name: item.operation.operationName,
           variables: item.operation.variables,
         });
       } catch (error) {
-        item.observer.error(error);
         this.log("Failed to replay item", {
           name: item.operation.operationName,
           variables: item.operation.variables,
@@ -152,6 +155,9 @@ export default class OfflineQueueLink extends ApolloLink {
             return;
           }
           observer.error(error);
+        },
+        complete: () => {
+          observer.complete();
         },
       });
 
