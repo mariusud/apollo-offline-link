@@ -36,11 +36,13 @@
   },
   "peerDependencies": {
     "@apollo/client": "^4.0.0",
+    "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-community/netinfo": "^11.3.2",
     "graphql": "^15.0.0 || ^16.0.0"
   },
   "devDependencies": {
     "@apollo/client": "^4.0.0",
+    "@react-native-async-storage/async-storage": "^2.2.0",
     "@types/node": "^22.0.0",
     "graphql": "^16.13.2",
     "typescript": "^5.0.0",

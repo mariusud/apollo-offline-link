@@ -1,20 +1,33 @@
 import type { Observer } from "rxjs";
 import { Observable } from "rxjs";
 
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { ApolloLink } from "@apollo/client";
+import { createOperation } from "@apollo/client/link/utils";
+
+type PersistedQueueItem = ApolloLink.Request & {
+  operationName?: string;
+};
+
+interface PersistedQueueEntry {
+  operation: PersistedQueueItem;
+  retryCount: number;
+}
+
+interface QueueItem {
+  operation: PersistedQueueItem;
+  retryCount: number;
+  observer?: Observer<ApolloLink.Result>;
+}
+
+const STORAGE_KEY = "apollo-offline-link-queue";
+const MAX_REPLAY_ATTEMPTS = 5;
 
 type OfflineQueueLinkOptions = {
   watchOperations: string[];
   logging?: boolean;
 };
-
-interface QueueItem {
-  operation: ApolloLink.Operation;
-  forward: ApolloLink.ForwardFunction;
-  observer: Observer<ApolloLink.Result>;
-}
-
 /**
  * Apollo Link that queues operations while offline and replays them when back online.
  */
@@ -23,6 +36,27 @@ export default class OfflineQueueLink extends ApolloLink {
   private queue: QueueItem[] = [];
   private watchedOperations: Set<string>;
   private isLoggingEnabled: boolean;
+  private client?: ApolloLink.Operation["client"];
+  private forward?: ApolloLink.ForwardFunction;
+  private ready = AsyncStorage.getItem(STORAGE_KEY).then((storedQueue) => {
+    if (storedQueue) {
+      this.queue = JSON.parse(storedQueue).map(
+        (entry: PersistedQueueEntry | PersistedQueueItem) => {
+          if ("operation" in entry) {
+            return {
+              operation: entry.operation,
+              retryCount: entry.retryCount,
+            };
+          }
+
+          return {
+            operation: entry,
+            retryCount: 0,
+          };
+        },
+      );
+    }
+  });
 
   constructor(options?: OfflineQueueLinkOptions) {
     super();
@@ -57,9 +91,38 @@ export default class OfflineQueueLink extends ApolloLink {
     return this.watchedOperations.has(operation.operationName || "");
   }
 
+  // we cant store the full Operation with forward/observer functions
+  private serializeOperation(
+    operation: ApolloLink.Operation,
+  ): PersistedQueueItem {
+    return {
+      query: operation.query,
+      variables: operation.variables,
+      extensions: operation.extensions,
+      operationName: operation.operationName,
+    };
+  }
+
+  private persistQueue() {
+    if (this.queue.length === 0) {
+      return AsyncStorage.removeItem(STORAGE_KEY);
+    }
+
+    return AsyncStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(
+        this.queue.map((item) => ({
+          operation: item.operation,
+          retryCount: item.retryCount,
+        })),
+      ),
+    );
+  }
+
   // queue functionality
   private enqueue(item: QueueItem) {
     this.queue.push(item);
+    void this.persistQueue();
 
     this.log("Added item to queue", {
       name: item.operation.operationName,
@@ -68,21 +131,29 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   private async replayQueue() {
+    await this.ready;
+
+    if (!this.forward || !this.client) {
+      return;
+    }
+
     while (this.queue.length > 0) {
       this.log("Attempting to replay queue", { size: this.queue.length });
-      const item = this.queue.shift()!;
+      const item = this.queue[0]!;
       try {
+        const operation = createOperation(item.operation, {
+          client: this.client,
+        });
         await new Promise<void>((resolve, reject) => {
-          item.forward(item.operation).subscribe({
+          this.forward!(operation).subscribe({
             next: (result) => {
-              item.observer.next(result);
+              item.observer?.next(result);
             },
             error: (error) => {
-              item.observer.error(error);
               reject(error);
             },
             complete: () => {
-              item.observer.complete();
+              item.observer?.complete();
               resolve();
             },
           });
@@ -91,12 +162,26 @@ export default class OfflineQueueLink extends ApolloLink {
           name: item.operation.operationName,
           variables: item.operation.variables,
         });
+        this.queue.shift();
+        await this.persistQueue();
       } catch (error) {
+        item.retryCount += 1;
         this.log("Failed to replay item", {
           name: item.operation.operationName,
           variables: item.operation.variables,
+          retryCount: item.retryCount,
           error: (error as Error)?.message,
         });
+
+        if (item.retryCount >= MAX_REPLAY_ATTEMPTS) {
+          item.observer?.error(error);
+          this.queue.shift();
+          await this.persistQueue();
+          continue;
+        }
+
+        await this.persistQueue();
+        return;
       }
     }
   }
@@ -110,6 +195,9 @@ export default class OfflineQueueLink extends ApolloLink {
     operation: ApolloLink.Operation,
     forward: ApolloLink.ForwardFunction,
   ): Observable<ApolloLink.Result> {
+    this.client = operation.client;
+    this.forward = forward;
+
     // offline and of interest, add to queue
     if (!this.isOnline && this.isWatchedOperation(operation)) {
       this.log("Offline, enqueuing operation", {
@@ -118,8 +206,8 @@ export default class OfflineQueueLink extends ApolloLink {
       });
       return new Observable<ApolloLink.Result>((observer) => {
         this.enqueue({
-          operation,
-          forward,
+          operation: this.serializeOperation(operation),
+          retryCount: 0,
           observer,
         });
       });
@@ -148,8 +236,8 @@ export default class OfflineQueueLink extends ApolloLink {
             this.isOnline = false;
             this.log("request:network-error:queued");
             this.enqueue({
-              operation,
-              forward,
+              operation: this.serializeOperation(operation),
+              retryCount: 0,
               observer,
             });
             return;
