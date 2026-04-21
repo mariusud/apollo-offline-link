@@ -5,32 +5,16 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { ApolloLink } from "@apollo/client";
 import { createOperation } from "@apollo/client/link/utils";
-
-type PersistedQueueItem = ApolloLink.Request & {
-  operationName?: string;
-};
-
-interface PersistedQueueEntry {
-  operation: PersistedQueueItem;
-  retryCount: number;
-}
-
-interface QueueItem {
-  operation: PersistedQueueItem;
-  retryCount: number;
-  observer?: Observer<ApolloLink.Result>;
-  forward?: ApolloLink.ForwardFunction;
-  client?: ApolloLink.Operation["client"];
-  restored?: boolean;
-}
+import type {
+  OfflineQueueLinkOptions,
+  PersistedQueueEntry,
+  PersistedQueueItem,
+  QueueItem,
+} from "./types";
 
 const STORAGE_KEY = "apollo-offline-link-queue";
 const MAX_REPLAY_ATTEMPTS = 5;
 
-type OfflineQueueLinkOptions = {
-  watchOperations: string[];
-  logging?: boolean;
-};
 /**
  * Apollo Link that queues operations while offline and replays them when back online.
  */
@@ -39,8 +23,12 @@ export default class OfflineQueueLink extends ApolloLink {
   private queue: QueueItem[] = [];
   private watchedOperations: Set<string>;
   private isLoggingEnabled: boolean;
-  private client?: ApolloLink.Operation["client"];
-  private forward?: ApolloLink.ForwardFunction;
+  private isReplaying: boolean;
+  private client?: ApolloLink.Operation["client"]; // latest seen client stored for replay of serialized operations without original client reference
+  private forward?: ApolloLink.ForwardFunction; // latest seen forward stored for replay of serialized operations without original forward reference
+
+  // Hydrate the persisted queue once up front, while accepting the older
+  // storage format that only contained serialized operations.
   private ready = AsyncStorage.getItem(STORAGE_KEY).then((storedQueue) => {
     if (storedQueue) {
       this.queue = JSON.parse(storedQueue).map(
@@ -68,13 +56,15 @@ export default class OfflineQueueLink extends ApolloLink {
     this.isOnline = true;
     this.watchedOperations = new Set(options?.watchOperations);
     this.isLoggingEnabled = options?.logging ?? false;
+    this.isReplaying = false;
 
     // Subscribe to network status changes
     NetInfo.addEventListener((state) => {
       this.isOnline = state.isInternetReachable === true;
       this.log("netinfo - isInternetReachable? " + state.isInternetReachable);
 
-      if (this.isOnline) {
+      // Replay gate: network is online & transport available
+      if (this.isOnline && this.client && this.forward) {
         this.replayQueue();
       }
     });
@@ -93,7 +83,10 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   private isWatchedOperation(operation: ApolloLink.Operation) {
-    return this.watchedOperations.has(operation.operationName || "");
+    const { operationName } = operation;
+    return (
+      operationName !== undefined && this.watchedOperations.has(operationName)
+    );
   }
 
   // we cant store the full Operation with forward/observer functions
@@ -147,92 +140,117 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   private async replayQueue() {
-    await this.ready;
+    if (this.isReplaying) {
+      this.log("Replay already in progress, skipping");
+      return;
+    }
 
-    while (this.queue.length > 0) {
-      this.log("Attempting to replay queue", { size: this.queue.length });
+    this.isReplaying = true;
 
-      const item = this.queue[0];
-      const forward = item.forward ?? this.forward;
-      const client = item.client ?? this.client;
+    try {
+      await this.ready;
 
-      if (!forward || !client) {
-        this.log("Missing replay transport for queued item", {
-          name: item.operation.operationName,
-          restored: item.restored ?? false,
-        });
-        return;
-      }
+      while (this.queue.length > 0) {
+        this.log("Attempting to replay queue", { size: this.queue.length });
 
-      try {
-        const operation = createOperation(item.operation, {
-          client,
-        });
-        await new Promise<void>((resolve, reject) => {
-          forward(operation).subscribe({
-            next: (result) => {
-              item.observer?.next(result);
-            },
-            error: (error) => {
-              reject(error);
-            },
-            complete: () => {
-              item.observer?.complete();
-              resolve();
-            },
+        // Keep the head item in place until it succeeds or exhausts retries.
+        const item = this.queue[0];
+        // Live items keep their original transport; restored items fall back to
+        // the latest transport observed after startup.
+        const forward = item.forward ?? this.forward;
+        const client = item.client ?? this.client;
+
+        if (!forward || !client) {
+          this.log("Missing replay transport for queued item", {
+            name: item.operation.operationName,
+            restored: item.restored ?? false,
           });
-        });
-        this.log("Successfully replayed item", {
-          name: item.operation.operationName,
-          variables: item.operation.variables,
-        });
-
-        this.queue.shift();
-        await this.persistQueue();
-      } catch (error) {
-        item.retryCount += 1;
-        this.log("Failed to replay item", {
-          name: item.operation.operationName,
-          variables: item.operation.variables,
-          retryCount: item.retryCount,
-          error: (error as Error)?.message,
-        });
-
-        if (item.retryCount >= MAX_REPLAY_ATTEMPTS) {
-          item.observer?.error(error);
-          this.queue.shift();
-          await this.persistQueue();
-          continue;
+          return;
         }
 
-        await this.persistQueue();
-        return;
+        try {
+          const operation = createOperation(item.operation, {
+            client,
+          });
+          // Replay the operation through the resolved transport and mirror the
+          // downstream observer events back to the original caller when possible.
+          await new Promise<void>((resolve, reject) => {
+            forward(operation).subscribe({
+              next: (result) => {
+                console.log("Replay next:", result);
+                item.observer?.next(result);
+              },
+              error: (error) => {
+                console.log("Replay error", error);
+                reject(error);
+              },
+              complete: () => {
+                console.log("Replay complete:", item.operation.operationName);
+                item.observer?.complete();
+                resolve();
+              },
+            });
+          });
+          this.log("Successfully replayed item", {
+            name: item.operation.operationName,
+            variables: item.operation.variables,
+          });
+
+          // Only remove persisted state after a confirmed successful replay.
+          this.queue.shift();
+          await this.persistQueue();
+        } catch (error) {
+          item.retryCount += 1;
+          this.log("Failed to replay item", {
+            name: item.operation.operationName,
+            variables: item.operation.variables,
+            retryCount: item.retryCount,
+            error: (error as Error)?.message,
+          });
+
+          if (item.retryCount >= MAX_REPLAY_ATTEMPTS) {
+            item.observer?.error(error);
+            this.queue.shift();
+            await this.persistQueue();
+            continue;
+          }
+
+          // Leave the item at the head and try again on the next replay trigger.
+          await this.persistQueue();
+          return;
+        }
       }
+    } finally {
+      this.isReplaying = false;
     }
   }
 
-  // This is the main entry point for the link - it handles queuing logic based on network status and operation type
-  // brief overview of the implementation:
-  // - store client/forward so we can use them for replaying items from storage that dont have those functions (since we cant store them directly)
-  // - if the operation is not watched/we're online, just forward it as normal
-  // - if a watched operation fails with a network error, mark us as offline and add it to the queue
-  // - if a watched operation is requested while offline, dont forward but add it to the queue
-  // - when we come back online, we replay the queued operations in order, waiting for each to complete before starting the next
+  // request flow:
+  // - remember the latest transport for restored-item fallback
+  // - if the operation is unwatched, or we're already online, forward it now
+  // - if a watched operation hits a network error, mark offline and enqueue it
+  // - if a watched operation starts while offline, enqueue it immediately
+  // - when connectivity returns, replay queued operations in order
   public request(
     operation: ApolloLink.Operation,
     forward: ApolloLink.ForwardFunction,
   ): Observable<ApolloLink.Result> {
+    const hadTransport = !!this.forward && !!this.client;
+
     this.client = operation.client;
     this.forward = forward;
     const isWatched = this.isWatchedOperation(operation);
 
-    // forward as normal
+    if (!hadTransport && this.isOnline && this.queue.length > 0) {
+      this.replayQueue();
+    }
+
     if (!isWatched || this.isOnline) {
       return new Observable<ApolloLink.Result>((observer) => {
-        // forward(operation) executes next link in chain, and subscribe to that so we can monitor
+        // Subscribe to the downstream link so we can react to network failures
+        // and re-synchronize the queue when connectivity returns.
         const subscription = forward(operation).subscribe({
           next: (result) => {
-            // a successful response - so if we're offline, go "online" and replay queue
             if (!this.isOnline) {
               this.log("Successful response while offline, marking as online");
               this.isOnline = true;
@@ -241,7 +259,6 @@ export default class OfflineQueueLink extends ApolloLink {
             observer.next(result);
           },
           error: (error) => {
-            // Error - if its watched and a network error, turn offline and enqueue
             if (isWatched && this.isNetworkError(error)) {
               this.isOnline = false;
               this.log("request:network-error:queued");
@@ -259,7 +276,6 @@ export default class OfflineQueueLink extends ApolloLink {
       });
     }
 
-    // if we're offline and its a watched operation, enqueue it without forwarding
     return new Observable<ApolloLink.Result>((observer) => {
       this.enqueue(operation, observer, forward);
     });
