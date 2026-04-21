@@ -19,6 +19,9 @@ interface QueueItem {
   operation: PersistedQueueItem;
   retryCount: number;
   observer?: Observer<ApolloLink.Result>;
+  forward?: ApolloLink.ForwardFunction;
+  client?: ApolloLink.Operation["client"];
+  restored?: boolean;
 }
 
 const STORAGE_KEY = "apollo-offline-link-queue";
@@ -46,12 +49,14 @@ export default class OfflineQueueLink extends ApolloLink {
             return {
               operation: entry.operation,
               retryCount: entry.retryCount,
+              restored: true,
             };
           }
 
           return {
             operation: entry,
             retryCount: 0,
+            restored: true,
           };
         },
       );
@@ -120,32 +125,51 @@ export default class OfflineQueueLink extends ApolloLink {
   }
 
   // queue functionality
-  private enqueue(item: QueueItem) {
-    this.queue.push(item);
+  private enqueue(
+    operation: ApolloLink.Operation,
+    observer: Observer<ApolloLink.Result>,
+    forward: ApolloLink.ForwardFunction,
+  ) {
+    this.queue.push({
+      operation: this.serializeOperation(operation),
+      retryCount: 0,
+      observer,
+      forward,
+      client: operation.client,
+      restored: false,
+    });
     void this.persistQueue();
 
     this.log("Added item to queue", {
-      name: item.operation.operationName,
-      variables: item.operation.variables,
+      name: operation.operationName,
+      variables: operation.variables,
     });
   }
 
   private async replayQueue() {
     await this.ready;
 
-    if (!this.forward || !this.client) {
-      return;
-    }
-
     while (this.queue.length > 0) {
       this.log("Attempting to replay queue", { size: this.queue.length });
-      const item = this.queue[0]!;
+
+      const item = this.queue[0];
+      const forward = item.forward ?? this.forward;
+      const client = item.client ?? this.client;
+
+      if (!forward || !client) {
+        this.log("Missing replay transport for queued item", {
+          name: item.operation.operationName,
+          restored: item.restored ?? false,
+        });
+        return;
+      }
+
       try {
         const operation = createOperation(item.operation, {
-          client: this.client,
+          client,
         });
         await new Promise<void>((resolve, reject) => {
-          this.forward!(operation).subscribe({
+          forward(operation).subscribe({
             next: (result) => {
               item.observer?.next(result);
             },
@@ -162,6 +186,7 @@ export default class OfflineQueueLink extends ApolloLink {
           name: item.operation.operationName,
           variables: item.operation.variables,
         });
+
         this.queue.shift();
         await this.persistQueue();
       } catch (error) {
@@ -186,10 +211,12 @@ export default class OfflineQueueLink extends ApolloLink {
     }
   }
 
+  // This is the main entry point for the link - it handles queuing logic based on network status and operation type
   // brief overview of the implementation:
-  // - if we're offline, add it to the queue with a timestamp
-  // - if we're online or not watching operation, just forward the operation as normal
+  // - store client/forward so we can use them for replaying items from storage that dont have those functions (since we cant store them directly)
+  // - if the operation is not watched/we're online, just forward it as normal
   // - if a watched operation fails with a network error, mark us as offline and add it to the queue
+  // - if a watched operation is requested while offline, dont forward but add it to the queue
   // - when we come back online, we replay the queued operations in order, waiting for each to complete before starting the next
   public request(
     operation: ApolloLink.Operation,
@@ -197,59 +224,44 @@ export default class OfflineQueueLink extends ApolloLink {
   ): Observable<ApolloLink.Result> {
     this.client = operation.client;
     this.forward = forward;
+    const isWatched = this.isWatchedOperation(operation);
 
-    // offline and of interest, add to queue
-    if (!this.isOnline && this.isWatchedOperation(operation)) {
-      this.log("Offline, enqueuing operation", {
-        name: operation.operationName,
-        variables: operation.variables,
-      });
+    // forward as normal
+    if (!isWatched || this.isOnline) {
       return new Observable<ApolloLink.Result>((observer) => {
-        this.enqueue({
-          operation: this.serializeOperation(operation),
-          retryCount: 0,
-          observer,
+        // forward(operation) executes next link in chain, and subscribe to that so we can monitor
+        const subscription = forward(operation).subscribe({
+          next: (result) => {
+            // a successful response - so if we're offline, go "online" and replay queue
+            if (!this.isOnline) {
+              this.log("Successful response while offline, marking as online");
+              this.isOnline = true;
+              this.replayQueue();
+            }
+            observer.next(result);
+          },
+          error: (error) => {
+            // Error - if its watched and a network error, turn offline and enqueue
+            if (isWatched && this.isNetworkError(error)) {
+              this.isOnline = false;
+              this.log("request:network-error:queued");
+              this.enqueue(operation, observer, forward);
+              return;
+            }
+            observer.error(error);
+          },
+          complete: () => {
+            observer.complete();
+          },
         });
+
+        return () => subscription.unsubscribe();
       });
     }
 
-    // online or dont care operation, forward
+    // if we're offline and its a watched operation, enqueue it without forwarding
     return new Observable<ApolloLink.Result>((observer) => {
-      const subscription = forward(operation).subscribe({
-        // got a successful response,
-        // if offline, go "online" and replay queue
-        next: (result) => {
-          if (!this.isOnline) {
-            this.log("Successful response while offline, marking as online");
-            this.isOnline = true;
-            this.replayQueue();
-          }
-          observer.next(result);
-        },
-        // Error
-        // if its watched and a network error, turn offline and queue
-        error: (error) => {
-          if (
-            this.isWatchedOperation(operation) &&
-            this.isNetworkError(error)
-          ) {
-            this.isOnline = false;
-            this.log("request:network-error:queued");
-            this.enqueue({
-              operation: this.serializeOperation(operation),
-              retryCount: 0,
-              observer,
-            });
-            return;
-          }
-          observer.error(error);
-        },
-        complete: () => {
-          observer.complete();
-        },
-      });
-
-      return () => subscription.unsubscribe();
+      this.enqueue(operation, observer, forward);
     });
   }
 }
