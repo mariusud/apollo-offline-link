@@ -1,12 +1,12 @@
 # apollo-offline-link
 
-A simple Apollo Link that queues specific operations while offline and replays them when connectivity returns.
+A simple Apollo link that queues selected operations while offline, persists them with AsyncStorage, and replays them when connectivity returns. This makes the link practical for example in offline workflows where important mutations should eventually be delivered even if the app is backgrounded or restarted.
 
 ## Install
 
 ```bash
 npm i apollo-offline-link
-npm i @apollo/client graphql @react-native-community/netinfo
+npm i @apollo/client graphql @react-native-community/netinfo @react-native-async-storage/async-storage
 ```
 
 ## Usage
@@ -35,10 +35,12 @@ const client = new ApolloClient({
 
 ## How It Works
 
-- If online, operations pass through immediately.
-- If offline and the operation name is listed in `watchOperations`, the operation is queued.
-- When connectivity returns, the queue is replayed in order.
-- If a watched operation fails with a network error, it is queued and the link marks itself offline.
+- If online, or an operation is not watched it will pass through immediately.
+- Operations listed in `watchOperations` will be queued when offline.
+- If a watched operation is attempted and hits a network error, it is added to the queue and the link marks itself offline.
+- The queue is persisted with AsyncStorage, so queued operations survive app restarts.
+- When connectivity returns, queued operations are replayed in order.
+- Failed replays stay at the head of the queue and are retried later. After 5 failed replay attempts, the queued item is dropped.
 
 By default, no operations are queued unless `watchOperations` is provided.
 
@@ -51,5 +53,5 @@ By default, no operations are queued unless `watchOperations` is provided.
 
 ## Notes
 
-- Operation matching is by `operationName`, so ensure your operations are named.
-- NetInfo is used for online/offline detection and can be flaky; the link will also mark itself online when a successful response arrives.
+- NetInfo is used for online/offline detection, and the link also uses request outcomes to refine its online/offline state.
+- To enable logging, set {logging: true} and it will emit logs with [apollo-offline-link] prefix
