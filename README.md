@@ -1,6 +1,6 @@
 # apollo-offline-link
 
-A simple Apollo link that queues selected operations while offline, persists them with AsyncStorage, and replays them when connectivity returns. This makes the link practical for example in offline workflows where important mutations should eventually be delivered even if the app is backgrounded or restarted.
+A simple Apollo link that queues selected operations while offline, persists them with AsyncStorage, and replays them when connectivity returns.
 
 ## Install
 
