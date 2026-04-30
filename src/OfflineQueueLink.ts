@@ -61,7 +61,13 @@ export default class OfflineQueueLink extends ApolloLink {
     // Subscribe to network status changes
     NetInfo.addEventListener((state) => {
       this.isOnline = state.isInternetReachable === true;
-      this.log("netinfo - isInternetReachable? " + state.isInternetReachable);
+      const reachabilityStatus =
+        state.isInternetReachable === true
+          ? "internet reachable"
+          : state.isInternetReachable === false
+            ? "internet not reachable"
+            : "internet reachability unknown";
+      this.log(reachabilityStatus);
 
       // Replay gate: network is online & transport available
       if (this.isOnline && this.client && this.forward) {
